@@ -1,0 +1,24 @@
+# dependencies
+/node_modules
+
+# next.js build output
+/.next/
+/out/
+
+# env files: every .env* except the template stays out of git
+.env*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# logs
+npm-debug.log*
+
+# editor/OS
+.DS_Store
+Thumbs.db
