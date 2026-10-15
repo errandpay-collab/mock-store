@@ -3,18 +3,18 @@ import { GATEWAY_URL } from "./config";
 /*
   Server-side payment check for the order page (import only from server code).
 
-  The hosted checkout sends the shopper back to /order/[id]?reference=…&status=…
-  &gatewayReference=…, but anyone can type those query values. So the store
-  never trusts `status` from the URL: it asks the checkout's status endpoint,
-  which confirms the payment with the ErrandPay gateway (/verify), and only a
-  confirmed "successful" counts as paid.
+  The hosted checkout sends the shopper back to /order/[id]?reference=<accessCode>
+  &status=…&gatewayReference=…, but anyone can type those values. So the store
+  never trusts `status` from the URL: it asks the checkout's status endpoint, which
+  reads the payment from the ErrandPay gateway (GET /gateway/checkout/{accessCode}),
+  and only counts it when the gateway's merchantReference is THIS order's.
 */
 
 export type VerifiedStatus = "successful" | "pending" | "failed" | "expired" | "cancelled" | "unknown";
 
 export interface VerifiedPayment {
   status: VerifiedStatus;
-  /** True only when the gateway itself confirmed the payment. */
+  /** True only when the gateway itself confirmed the payment belongs to this order. */
   verified: boolean;
   paymentMethod?: "card" | "bank_transfer";
   amount?: number;
@@ -22,26 +22,34 @@ export interface VerifiedPayment {
   gatewayReference?: string;
 }
 
-const REFERENCE = /^[A-Za-z0-9-]{1,60}$/;
-const GATEWAY_REFERENCE = /^[A-Za-z0-9-]{1,100}$/;
+const ACCESS_CODE = /^[A-Za-z0-9_-]{8,64}$/;
 const KNOWN: VerifiedStatus[] = ["successful", "pending", "failed", "expired", "cancelled"];
 
-export async function verifyPayment(reference?: string, gatewayReference?: string, urlStatus?: string): Promise<VerifiedPayment> {
-  // No payment attempt was made (e.g. the shopper cancelled before paying): nothing to verify.
-  if (!reference || !REFERENCE.test(reference) || !gatewayReference || !GATEWAY_REFERENCE.test(gatewayReference)) {
-    const status = urlStatus === "cancelled" ? "cancelled" : "unknown";
-    return { status, verified: false };
+export async function verifyPayment(orderId: string, accessCode?: string, urlStatus?: string): Promise<VerifiedPayment> {
+  // No access code (e.g. the shopper cancelled before paying): nothing to verify.
+  if (!accessCode || !ACCESS_CODE.test(accessCode)) {
+    return { status: urlStatus === "cancelled" ? "cancelled" : "unknown", verified: false };
   }
 
   try {
-    const url = new URL(`/api/checkout/${encodeURIComponent(reference)}/status`, GATEWAY_URL);
-    url.searchParams.set("gatewayReference", gatewayReference);
+    const url = new URL(`/api/checkout/${encodeURIComponent(accessCode)}/status`, GATEWAY_URL);
     const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) return { status: "unknown", verified: false, gatewayReference };
+    if (!response.ok) return { status: "unknown", verified: false };
 
     const { data } = (await response.json()) as {
-      data?: { status?: string; paymentMethod?: "card" | "bank_transfer"; amount?: number; paidAt?: string };
+      data?: {
+        status?: string;
+        paymentMethod?: "card" | "bank_transfer";
+        amount?: number;
+        paidAt?: string;
+        gatewayReference?: string;
+        merchantReference?: string;
+      };
     };
+
+    // A real access code from a different order must not confirm this one.
+    if (data?.merchantReference !== `EPY-${orderId}`) return { status: "unknown", verified: false };
+
     const status = KNOWN.includes(data?.status as VerifiedStatus) ? (data!.status as VerifiedStatus) : "unknown";
     return {
       status,
@@ -49,9 +57,9 @@ export async function verifyPayment(reference?: string, gatewayReference?: strin
       paymentMethod: data?.paymentMethod,
       amount: data?.amount,
       paidAt: data?.paidAt,
-      gatewayReference,
+      gatewayReference: data?.gatewayReference,
     };
   } catch {
-    return { status: "unknown", verified: false, gatewayReference };
+    return { status: "unknown", verified: false };
   }
 }

@@ -1,24 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useCart } from "@/lib/cart-context";
 import { formatNaira } from "@/lib/format";
-import { GATEWAY_URL, STORE_URL } from "@/lib/config";
 import { savePendingOrder } from "@/lib/pending-order";
 import { getShippingFee, amountToFreeShipping } from "@/lib/shipping";
 import { CheckoutSteps } from "@/components/checkout-steps";
-
-function generateOrderId() {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
-}
-
-function summarizeItems(lines: { product: { name: string }; qty: number }[]) {
-  const parts = lines.map((l) => `${l.qty} x ${l.product.name}`);
-  if (parts.length <= 3) return parts.join(", ");
-  return `${parts.slice(0, 3).join(", ")} and ${parts.length - 3} more`;
-}
 
 interface FormState {
   email: string;
@@ -35,58 +24,12 @@ export function CheckoutClient() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [errors, setErrors] = useState<Partial<Record<keyof FormState, boolean>>>({});
   const [submitting, setSubmitting] = useState(false);
-  // Generated once per checkout visit so refreshing this page doesn't reuse a
-  // reference the gateway may already have a result recorded for.
-  const [orderId] = useState(generateOrderId);
+  const [payError, setPayError] = useState<string | null>(null);
 
-  const reference = `EPY-${orderId}`;
+  // Display only: the store's server recalculates the amount from its own catalog.
   const shippingFee = getShippingFee(subtotal);
   const total = subtotal + shippingFee;
   const remainingForFreeShipping = amountToFreeShipping(subtotal);
-
-  const payUrl = useMemo(() => {
-    if (lines.length === 0) return null;
-    const url = new URL(`/pay/${reference}`, GATEWAY_URL);
-    url.searchParams.set("amount", String(total));
-    url.searchParams.set("currency", "NGN");
-    url.searchParams.set("description", summarizeItems(lines));
-    url.searchParams.set("merchant", "Mock Mart");
-    url.searchParams.set("merchantWebsite", "mockmart.test");
-    if (form.email) url.searchParams.set("email", form.email);
-    // Use the address this store is actually served from, so a deployed store never
-    // sends shoppers back to localhost; NEXT_PUBLIC_STORE_URL is only the fallback.
-    const storeOrigin = typeof window !== "undefined" ? window.location.origin : STORE_URL;
-    url.searchParams.set("returnUrl", new URL(`/order/${orderId}`, storeOrigin).toString());
-    return url.toString();
-  }, [form.email, lines, orderId, reference, total]);
-
-  // Snapshot the cart under this order id so /order/[id] can show what was
-  // actually bought once the browser is redirected back from the gateway.
-  useEffect(() => {
-    if (lines.length === 0) return;
-    savePendingOrder({
-      id: orderId,
-      reference,
-      email: form.email,
-      shipping: {
-        fullName: form.fullName,
-        address: form.address,
-        city: form.city,
-        phone: form.phone,
-      },
-      subtotal,
-      shippingFee,
-      amount: total,
-      createdAt: new Date().toISOString(),
-      lines: lines.map((l) => ({
-        slug: l.product.slug,
-        name: l.product.name,
-        image: l.product.images[0],
-        qty: l.qty,
-        price: l.product.price,
-      })),
-    });
-  }, [form, lines, orderId, reference, shippingFee, subtotal, total]);
 
   function field(name: keyof FormState) {
     return {
@@ -98,9 +41,9 @@ export function CheckoutClient() {
     };
   }
 
-  function handlePay(e: React.FormEvent) {
+  async function handlePay(e: React.FormEvent) {
     e.preventDefault();
-    if (!payUrl) return;
+    if (lines.length === 0 || submitting) return;
     const required: (keyof FormState)[] = ["email", "fullName", "address", "city", "phone"];
     const nextErrors: Partial<Record<keyof FormState, boolean>> = {};
     for (const key of required) {
@@ -111,8 +54,45 @@ export function CheckoutClient() {
       document.getElementById(`field-${Object.keys(nextErrors)[0]}`)?.focus();
       return;
     }
+
     setSubmitting(true);
-    window.location.href = payUrl;
+    setPayError(null);
+    try {
+      // The store's server prices the cart and calls ErrandPay's /gateway/initialize.
+      const response = await fetch("/api/pay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: form.email, lines: lines.map((l) => ({ slug: l.product.slug, qty: l.qty })) }),
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok || !result?.checkoutUrl) {
+        throw new Error(result?.message ?? "We couldn't start the payment. Please try again.");
+      }
+
+      // Snapshot the order so /order/[id] can show what was bought after the round trip.
+      savePendingOrder({
+        id: result.orderId,
+        reference: `EPY-${result.orderId}`,
+        email: form.email,
+        shipping: { fullName: form.fullName, address: form.address, city: form.city, phone: form.phone },
+        subtotal: result.subtotal,
+        shippingFee: result.shippingFee,
+        amount: result.amount,
+        createdAt: new Date().toISOString(),
+        lines: lines.map((l) => ({
+          slug: l.product.slug,
+          name: l.product.name,
+          image: l.product.images[0],
+          qty: l.qty,
+          price: l.product.price,
+        })),
+      });
+
+      window.location.href = result.checkoutUrl;
+    } catch (error) {
+      setPayError(error instanceof Error ? error.message : "We couldn't start the payment. Please try again.");
+      setSubmitting(false);
+    }
   }
 
   if (lines.length === 0) {
@@ -363,11 +343,17 @@ export function CheckoutClient() {
               disabled={submitting}
               className="mt-5 flex h-12 w-full items-center justify-center rounded-xl bg-gradient-to-r from-amber-500 to-rose-500 px-5 text-sm font-bold text-white shadow-glow transition hover:brightness-105 disabled:cursor-wait disabled:opacity-80"
             >
-              {submitting ? "Redirecting…" : "Pay with ErrandPay"}
+              {submitting ? "Starting secure payment…" : "Pay with ErrandPay"}
             </button>
 
+            {payError && (
+              <p role="alert" className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-center text-xs font-medium text-rose-600">
+                {payError}
+              </p>
+            )}
+
             <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-xs text-stone-400">
-              <span aria-hidden>🔒</span> Secured by ErrandPay · Order ref {reference}
+              <span aria-hidden>🔒</span> Secured by ErrandPay
             </p>
           </div>
         </div>

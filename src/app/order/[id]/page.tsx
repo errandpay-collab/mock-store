@@ -15,8 +15,9 @@ export default async function OrderPage({
   const query = await searchParams;
   const pick = (key: string) => (typeof query[key] === "string" ? (query[key] as string) : undefined);
 
-  // `status` from the URL is only a hint; verifyPayment confirms it with the gateway.
-  const payment = await verifyPayment(pick("reference"), pick("gatewayReference"), pick("status"));
+  // `reference` is the accessCode the checkout returns. `status` is only a hint;
+  // verifyPayment confirms the payment (and that it is this order's) with the gateway.
+  const payment = await verifyPayment(id, pick("reference"), pick("status"));
 
   return <OrderClient id={id} payment={payment} />;
 }
