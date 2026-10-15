@@ -1,4 +1,4 @@
-import { GATEWAY_URL } from "./config";
+import { checkoutUrl } from "./config";
 
 /*
   Server-side payment check for the order page (import only from server code).
@@ -32,7 +32,7 @@ export async function verifyPayment(orderId: string, accessCode?: string, urlSta
   }
 
   try {
-    const url = new URL(`/api/checkout/${encodeURIComponent(accessCode)}/status`, GATEWAY_URL);
+    const url = new URL(`/api/checkout/${encodeURIComponent(accessCode)}/status`, checkoutUrl());
     const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
     if (!response.ok) return { status: "unknown", verified: false };
 

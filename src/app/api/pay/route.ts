@@ -2,16 +2,12 @@ import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getProduct } from "@/lib/products";
 import { getShippingFee } from "@/lib/shipping";
-import { GATEWAY_URL } from "@/lib/config";
+import { checkoutUrl } from "@/lib/config";
 
 /*
-  POST /api/pay: the shopper clicks "Pay with ErrandPay".
-
-  Mock Mart is the merchant. Its server prices the cart from its own catalog (the
-  browser can't change the amount) and starts the payment with ErrandPay's
-  POST /api/v1/gateway/initialize using its own epKey (server-only env:
-  ERRANDPAY_BASE_URL, ERRANDPAY_EP_KEY). The shopper is then sent to the hosted
-  checkout at {NEXT_PUBLIC_GATEWAY_URL}/pay/{accessCode}.
+  POST /api/pay: prices the cart from the store's own catalog, starts the payment with
+  POST /api/v1/gateway/initialize (Mock Mart's epKey) and returns the hosted checkout link.
+  Server-only env: ERRANDPAY_BASE_URL, ERRANDPAY_EP_KEY, ERRANDPAY_CHECKOUT_URL.
 */
 
 export const maxDuration = 30;
@@ -25,9 +21,16 @@ function summarize(items: { name: string; qty: number }[]) {
 export async function POST(request: NextRequest) {
   const baseUrl = process.env.ERRANDPAY_BASE_URL?.trim().replace(/\/+$/, "");
   const epKey = process.env.ERRANDPAY_EP_KEY?.trim();
-  if (!baseUrl || !epKey) {
-    console.error("[mockmart] ERRANDPAY_BASE_URL / ERRANDPAY_EP_KEY are not configured");
-    return NextResponse.json({ message: "Payments aren't set up for this store yet." }, { status: 500 });
+  let checkoutBase = "";
+  try {
+    checkoutBase = checkoutUrl();
+  } catch {
+    // reported below
+  }
+  if (!baseUrl || !epKey || !checkoutBase) {
+    const missing = [!baseUrl && "ERRANDPAY_BASE_URL", !epKey && "ERRANDPAY_EP_KEY", !checkoutBase && "ERRANDPAY_CHECKOUT_URL"].filter(Boolean);
+    console.error(`[mockmart] not configured: ${missing.join(", ")}`);
+    return NextResponse.json({ message: `Payments aren't set up for this store yet (missing ${missing.join(", ")}).` }, { status: 500 });
   }
 
   const body = (await request.json().catch(() => null)) as { email?: unknown; lines?: Array<{ slug?: unknown; qty?: unknown }> } | null;
@@ -73,7 +76,6 @@ export async function POST(request: NextRequest) {
       data?: { accessCode?: string; authorizationUrl?: string };
       error?: { message?: string };
     } | null;
-    console.info(`[mockmart] initialize ${merchantReference} -> HTTP ${response.status} ${result?.message ?? "(no JSON)"}`);
 
     const accessCode = result?.data?.accessCode;
     if (!response.ok || result?.message !== "Successful" || !accessCode) {
@@ -83,10 +85,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // The documented authorizationUrl points at checkout.errandpay.com; until that domain
-    // serves this checkout, use the configured checkout address with the same accessCode.
-    const checkoutUrl = `${GATEWAY_URL.replace(/\/+$/, "")}/pay/${encodeURIComponent(accessCode)}`;
-    return NextResponse.json({ orderId, checkoutUrl, subtotal, shippingFee, amount });
+    return NextResponse.json({
+      orderId,
+      checkoutUrl: `${checkoutBase}/pay/${encodeURIComponent(accessCode)}`,
+      subtotal,
+      shippingFee,
+      amount,
+    });
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown";
     console.error(`[mockmart] initialize failed: ${reason}`);
