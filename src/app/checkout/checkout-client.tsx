@@ -63,6 +63,13 @@ export function CheckoutClient() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: form.email, lines: lines.map((l) => ({ slug: l.product.slug, qty: l.qty })) }),
+        signal: AbortSignal.timeout(25_000),
+      }).catch((error: unknown) => {
+        throw new Error(
+          error instanceof Error && error.name === "TimeoutError"
+            ? "Starting the payment is taking too long. Please try again."
+            : "We couldn't reach the store. Check your connection and try again.",
+        );
       });
       const result = await response.json().catch(() => null);
       if (!response.ok || !result?.checkoutUrl) {
